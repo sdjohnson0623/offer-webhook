@@ -122,6 +122,103 @@ def creative_structure(asking, mortgage_balance, mortgage_rate=None, cfg=DEFAULT
     }
 
 
+def _balance_factor(annual_rate, amort_years, balloon_years,
+                    interest_only=False):
+    """Fraction of the original loan balance still owed at the balloon."""
+    if interest_only:
+        return 1.0
+    if annual_rate == 0:
+        return max(0.0, 1.0 - balloon_years / amort_years)
+    r = annual_rate / 12.0
+    n = amort_years * 12
+    m = balloon_years * 12
+    return ((1 + r) ** n - (1 + r) ** m) / ((1 + r) ** n - 1)
+
+
+def seller_finance(monthly_rent, annual_tax, arv, repairs, cfg=DEFAULTS,
+                   asking=None, sf_price=None, sf_down=0.0, sf_rate=None,
+                   sf_amort_years=30, sf_balloon_years=6,
+                   sf_interest_only=False):
+    """Seller-financed structure solver (Shawn, 2026-10-16).
+
+    Primary case: turnkey rentals with tenants in place, where the rent is
+    actual. A structure passes only if BOTH tests pass:
+    1. Cash-flow test — after the seller payment, the property still hits
+       Shawn's target cash-on-cash on his cash in (down + closing + repairs).
+    2. Balloon test — the balance due at the balloon year is no more than
+       arv_basis_cap_pct (78%) of CURRENT ARV (never a projected value), so
+       a refinance can retire it.
+    Returns the highest price that passes both tests at the given terms,
+    plus a verdict on a tested price (defaults to the asking price).
+    """
+    n = noi(monthly_rent, annual_tax, cfg["insurance_annual"],
+            cfg["vacancy"], cfg["maint_mgmt_pct"])
+    rate = cfg["loan_rate"] if sf_rate is None else sf_rate
+    down = float(sf_down or 0)
+    t = cfg["target_coc"]
+    c = cfg["closing_pct"]
+    if sf_interest_only:
+        k = rate  # annual debt service per $1 financed
+    else:
+        k = _pmt(1.0, rate, sf_amort_years) * 12
+    b = _balance_factor(rate, sf_amort_years, sf_balloon_years,
+                        sf_interest_only)
+
+    def _at(price):
+        financed = max(0.0, price - down)
+        monthly = financed * rate / 12.0 if sf_interest_only else \
+            financed * _pmt(1.0, rate, sf_amort_years)
+        cash_in = down + c * price + repairs
+        cash_flow = n - monthly * 12
+        return {
+            "monthly_payment": round(monthly),
+            "balloon_balance": round(financed * b),
+            "balloon_cap": round(cfg["arv_basis_cap_pct"] * arv),
+            "cash_in": round(cash_in),
+            "est_annual_cash_flow": round(cash_flow),
+            "est_coc_pct": round(100.0 * cash_flow / cash_in, 1)
+            if cash_in > 0 else None,
+        }
+
+    if n <= 0:
+        max_price = 0
+    else:
+        # Cash-flow test solved for price (down payment is a fixed $ amount).
+        p_cf = (n + down * (k - t) - t * repairs) / (k + t * c)
+        # Balloon test solved for price.
+        p_bal = down + cfg["arv_basis_cap_pct"] * arv / b if b > 0 else 0
+        max_price = max(0, round(min(p_cf, p_bal)))
+
+    tested = sf_price if sf_price is not None else asking
+    out = {
+        "max_price": max_price,
+        "down": round(down),
+        "rate_assumed": rate,
+        "amort_years": sf_amort_years,
+        "balloon_years": sf_balloon_years,
+        "interest_only": bool(sf_interest_only),
+        "at_max": _at(max_price),
+        "price_tested": round(tested) if tested else None,
+        "price_works": None,
+        "failed_test": None,
+        "at_tested": None,
+    }
+    if tested:
+        at = _at(float(tested))
+        out["at_tested"] = at
+        cf_ok = at["est_coc_pct"] is not None and \
+            at["est_coc_pct"] >= 100.0 * t
+        bal_ok = at["balloon_balance"] <= at["balloon_cap"]
+        out["price_works"] = bool(cf_ok and bal_ok)
+        if not cf_ok and not bal_ok:
+            out["failed_test"] = "both"
+        elif not cf_ok:
+            out["failed_test"] = "cash_flow"
+        elif not bal_ok:
+            out["failed_test"] = "balloon_cap"
+    return out
+
+
 def evaluate(payload: dict) -> dict:
     """Single entry point for the webhook.
 
@@ -159,6 +256,14 @@ def evaluate(payload: dict) -> dict:
         out["rental"] = rp
         # A hold is attractive if the financed 20%-CoC price clears the cash max.
         out["rental_hold_viable"] = rp["price_at_target_coc_levered"] >= cash_max
+        out["seller_finance"] = seller_finance(
+            float(rent), float(tax), arv, repairs, cfg, asking,
+            sf_price=payload.get("sf_price"),
+            sf_down=payload.get("sf_down") or 0,
+            sf_rate=payload.get("sf_rate"),
+            sf_amort_years=payload.get("sf_amort_years") or 30,
+            sf_balloon_years=payload.get("sf_balloon_years") or 6,
+            sf_interest_only=bool(payload.get("sf_interest_only")))
 
     bal = payload.get("mortgage_balance")
     creative = None
@@ -207,6 +312,8 @@ def evaluate(payload: dict) -> dict:
     out["ceiling"] = ceiling
     out["max_offer"] = ceiling  # hard cap the agent may state
     out["walk_away"] = ceiling
+
+    out.setdefault("seller_finance", None)
 
     # Assign ceiling (Shawn, 2026-10-16): if this deal is assigned to another
     # buyer instead of held, the contract price must leave room for Shawn's
