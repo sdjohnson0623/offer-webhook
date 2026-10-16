@@ -30,6 +30,8 @@ DEFAULTS = {
     "cash_to_seller_pct_of_equity": 0.35,  # opening creative structure
     "arv_basis_cap_pct": 0.78,  # Shawn's rule (2026-10-16): on a rental hold,
                                 # price + repairs may not exceed 78% of ARV
+    "sf_payment_rent_cap_pct": 0.40,  # Shawn's rule (2026-10-16): seller-
+                                # finance payment <= 40% of monthly rent
 }
 
 
@@ -142,14 +144,17 @@ def seller_finance(monthly_rent, annual_tax, arv, repairs, cfg=DEFAULTS,
     """Seller-financed structure solver (Shawn, 2026-10-16).
 
     Primary case: turnkey rentals with tenants in place, where the rent is
-    actual. A structure passes only if BOTH tests pass:
+    actual. A structure passes only if ALL THREE tests pass:
     1. Cash-flow test — after the seller payment, the property still hits
        Shawn's target cash-on-cash on his cash in (down + closing + repairs).
     2. Balloon test — the balance due at the balloon year is no more than
        arv_basis_cap_pct (78%) of CURRENT ARV (never a projected value), so
        a refinance can retire it.
-    Returns the highest price that passes both tests at the given terms,
-    plus a verdict on a tested price (defaults to the asking price).
+    3. Payment cap (Shawn, 2026-10-16) — the monthly payment to the seller
+       may not exceed 40% of the property's total monthly rent, leaving
+       room for management, upkeep, and his minimum cash-on-cash.
+    Returns the highest price that passes all three tests at the given
+    terms, plus a verdict on a tested price (defaults to the asking price).
     """
     n = noi(monthly_rent, annual_tax, cfg["insurance_annual"],
             cfg["vacancy"], cfg["maint_mgmt_pct"])
@@ -164,6 +169,8 @@ def seller_finance(monthly_rent, annual_tax, arv, repairs, cfg=DEFAULTS,
     b = _balance_factor(rate, sf_amort_years, sf_balloon_years,
                         sf_interest_only)
 
+    pay_cap = cfg["sf_payment_rent_cap_pct"] * monthly_rent
+
     def _at(price):
         financed = max(0.0, price - down)
         monthly = financed * rate / 12.0 if sf_interest_only else \
@@ -172,6 +179,7 @@ def seller_finance(monthly_rent, annual_tax, arv, repairs, cfg=DEFAULTS,
         cash_flow = n - monthly * 12
         return {
             "monthly_payment": round(monthly),
+            "payment_cap_monthly": round(pay_cap),
             "balloon_balance": round(financed * b),
             "balloon_cap": round(cfg["arv_basis_cap_pct"] * arv),
             "cash_in": round(cash_in),
@@ -187,7 +195,12 @@ def seller_finance(monthly_rent, annual_tax, arv, repairs, cfg=DEFAULTS,
         p_cf = (n + down * (k - t) - t * repairs) / (k + t * c)
         # Balloon test solved for price.
         p_bal = down + cfg["arv_basis_cap_pct"] * arv / b if b > 0 else 0
-        max_price = max(0, round(min(p_cf, p_bal)))
+        # Payment cap solved for price: monthly payment <= cap.
+        if sf_interest_only:
+            p_pay = down + pay_cap * 12.0 / rate if rate > 0 else 0
+        else:
+            p_pay = down + pay_cap / _pmt(1.0, rate, sf_amort_years)
+        max_price = max(0, round(min(p_cf, p_bal, p_pay)))
 
     tested = sf_price if sf_price is not None else asking
     out = {
@@ -206,16 +219,17 @@ def seller_finance(monthly_rent, annual_tax, arv, repairs, cfg=DEFAULTS,
     if tested:
         at = _at(float(tested))
         out["at_tested"] = at
-        cf_ok = at["est_coc_pct"] is not None and \
-            at["est_coc_pct"] >= 100.0 * t
-        bal_ok = at["balloon_balance"] <= at["balloon_cap"]
-        out["price_works"] = bool(cf_ok and bal_ok)
-        if not cf_ok and not bal_ok:
-            out["failed_test"] = "both"
-        elif not cf_ok:
-            out["failed_test"] = "cash_flow"
-        elif not bal_ok:
-            out["failed_test"] = "balloon_cap"
+        failed = []
+        if not (at["est_coc_pct"] is not None
+                and at["est_coc_pct"] >= 100.0 * t):
+            failed.append("cash_flow")
+        if at["balloon_balance"] > at["balloon_cap"]:
+            failed.append("balloon_cap")
+        if at["monthly_payment"] > at["payment_cap_monthly"]:
+            failed.append("payment_cap")
+        out["failed_tests"] = failed
+        out["failed_test"] = "+".join(failed) if failed else None
+        out["price_works"] = not failed
     return out
 
 
@@ -227,7 +241,8 @@ def evaluate(payload: dict) -> dict:
               monthly_rent, annual_tax, profit_margin, wholesale_fee.
     """
     cfg = dict(DEFAULTS)
-    for k in ("profit_margin", "wholesale_fee", "arv_basis_cap_pct"):
+    for k in ("profit_margin", "wholesale_fee", "arv_basis_cap_pct",
+              "sf_payment_rent_cap_pct"):
         if payload.get(k) is not None:
             cfg[k] = payload[k]
 
