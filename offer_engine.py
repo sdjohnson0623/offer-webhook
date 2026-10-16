@@ -28,6 +28,8 @@ DEFAULTS = {
     "down_pct": 0.20,
     "closing_pct": 0.03,
     "cash_to_seller_pct_of_equity": 0.35,  # opening creative structure
+    "arv_basis_cap_pct": 0.78,  # Shawn's rule (2026-10-16): on a rental hold,
+                                # price + repairs may not exceed 78% of ARV
 }
 
 
@@ -52,21 +54,31 @@ def noi(monthly_rent, annual_tax, insurance_annual=DEFAULTS["insurance_annual"],
     return gross * (1 - vacancy) - annual_tax - insurance_annual - gross * maint_mgmt_pct
 
 
-def rental_prices(monthly_rent, annual_tax, cfg=DEFAULTS, repairs=0.0):
+def rental_prices(monthly_rent, annual_tax, cfg=DEFAULTS, repairs=0.0,
+                  arv=None):
     """Prices at which the rental math hits Shawn's targets.
 
     Repairs are cash the buyer pays on top of the purchase price, so each
     supported price is reduced dollar-for-dollar by the repair estimate
     (floored at 0): the most he can PAY for the house and still hit target
     returns after also funding the rehab.
+
+    Basis guardrail (Shawn, 2026-10-16): when the ARV is known, no supported
+    price may put total basis (price + repairs) above arv_basis_cap_pct of
+    ARV, so a strong rent can never talk him into overpaying against value.
     """
     n = noi(monthly_rent, annual_tax, cfg["insurance_annual"],
             cfg["vacancy"], cfg["maint_mgmt_pct"])
+    basis_cap_price = None
+    if arv:
+        basis_cap_price = max(0, round(cfg["arv_basis_cap_pct"] * arv
+                                       - repairs))
     if n <= 0:
         return {"noi": round(n), "price_at_target_cap": 0,
                 "price_at_target_coc_unlevered": 0,
                 "price_at_target_coc_levered": 0,
-                "repairs_deducted": round(repairs)}
+                "repairs_deducted": round(repairs),
+                "basis_cap_price": basis_cap_price}
     # Unlevered: price where cap == target_coc
     p_unlev = n / cfg["target_coc"]
     # Levered: solve price P so (NOI - debt_service) / cash_in == target_coc
@@ -76,12 +88,20 @@ def rental_prices(monthly_rent, annual_tax, cfg=DEFAULTS, repairs=0.0):
     denom = monthly_factor * (1 - cfg["down_pct"]) + cfg["target_coc"] * (
         cfg["down_pct"] + cfg["closing_pct"])
     p_lev = n / denom if denom > 0 else 0
+
+    def _cap(price):
+        price = max(0, round(price))
+        if basis_cap_price is not None:
+            price = min(price, basis_cap_price)
+        return price
+
     return {
         "noi": round(n),
-        "price_at_target_cap": max(0, round(n / cfg["target_cap"] - repairs)),
-        "price_at_target_coc_unlevered": max(0, round(p_unlev - repairs)),
-        "price_at_target_coc_levered": max(0, round(p_lev - repairs)),
+        "price_at_target_cap": _cap(n / cfg["target_cap"] - repairs),
+        "price_at_target_coc_unlevered": _cap(p_unlev - repairs),
+        "price_at_target_coc_levered": _cap(p_lev - repairs),
         "repairs_deducted": round(repairs),
+        "basis_cap_price": basis_cap_price,
     }
 
 
@@ -110,7 +130,7 @@ def evaluate(payload: dict) -> dict:
               monthly_rent, annual_tax, profit_margin, wholesale_fee.
     """
     cfg = dict(DEFAULTS)
-    for k in ("profit_margin", "wholesale_fee"):
+    for k in ("profit_margin", "wholesale_fee", "arv_basis_cap_pct"):
         if payload.get(k) is not None:
             cfg[k] = payload[k]
 
@@ -130,7 +150,7 @@ def evaluate(payload: dict) -> dict:
     rent = payload.get("monthly_rent")
     tax = payload.get("annual_tax")
     if rent and tax is not None:
-        rp = rental_prices(float(rent), float(tax), cfg, repairs)
+        rp = rental_prices(float(rent), float(tax), cfg, repairs, arv)
         out["rental"] = rp
         # A hold is attractive if the financed 20%-CoC price clears the cash max.
         out["rental_hold_viable"] = rp["price_at_target_coc_levered"] >= cash_max
