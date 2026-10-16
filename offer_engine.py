@@ -135,6 +135,11 @@ def evaluate(payload: dict) -> dict:
             cfg[k] = payload[k]
 
     arv = float(payload["arv"])
+    # Shawn's fee cap (2026-10-16): on houses under $100k ARV his assignment
+    # fee caps at $5,000 (the lower cap), not the standard $10,000 — applies
+    # wherever the default fee is used, unless a call sets the fee explicitly.
+    if payload.get("wholesale_fee") is None and arv < 100000:
+        cfg["wholesale_fee"] = 5000
     repairs = float(payload.get("repairs") or 0)
     asking = payload.get("asking_price")
     asking = float(asking) if asking else None
@@ -202,4 +207,16 @@ def evaluate(payload: dict) -> dict:
     out["ceiling"] = ceiling
     out["max_offer"] = ceiling  # hard cap the agent may state
     out["walk_away"] = ceiling
+
+    # Assign ceiling (Shawn, 2026-10-16): if this deal is assigned to another
+    # buyer instead of held, the contract price must leave room for Shawn's
+    # assignment fee on top of it: assign_ceiling = ceiling - fee. The fee is
+    # $10,000 standard, capped at $5,000 on houses under $100k ARV (applied
+    # above). The wholesale path already nets the fee inside its max offer,
+    # so the assign figure only applies to the hold and creative paths.
+    if out["recommended_structure"] == "cash_offer_wholesale":
+        out["assign_ceiling"] = None
+    else:
+        out["assign_ceiling"] = max(0, ceiling - cfg["wholesale_fee"])
+    out["assignment_fee"] = cfg["wholesale_fee"]
     return out
