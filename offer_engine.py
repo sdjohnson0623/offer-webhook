@@ -52,14 +52,21 @@ def noi(monthly_rent, annual_tax, insurance_annual=DEFAULTS["insurance_annual"],
     return gross * (1 - vacancy) - annual_tax - insurance_annual - gross * maint_mgmt_pct
 
 
-def rental_prices(monthly_rent, annual_tax, cfg=DEFAULTS):
-    """Prices at which the rental math hits Shawn's targets."""
+def rental_prices(monthly_rent, annual_tax, cfg=DEFAULTS, repairs=0.0):
+    """Prices at which the rental math hits Shawn's targets.
+
+    Repairs are cash the buyer pays on top of the purchase price, so each
+    supported price is reduced dollar-for-dollar by the repair estimate
+    (floored at 0): the most he can PAY for the house and still hit target
+    returns after also funding the rehab.
+    """
     n = noi(monthly_rent, annual_tax, cfg["insurance_annual"],
             cfg["vacancy"], cfg["maint_mgmt_pct"])
     if n <= 0:
         return {"noi": round(n), "price_at_target_cap": 0,
                 "price_at_target_coc_unlevered": 0,
-                "price_at_target_coc_levered": 0}
+                "price_at_target_coc_levered": 0,
+                "repairs_deducted": round(repairs)}
     # Unlevered: price where cap == target_coc
     p_unlev = n / cfg["target_coc"]
     # Levered: solve price P so (NOI - debt_service) / cash_in == target_coc
@@ -71,9 +78,10 @@ def rental_prices(monthly_rent, annual_tax, cfg=DEFAULTS):
     p_lev = n / denom if denom > 0 else 0
     return {
         "noi": round(n),
-        "price_at_target_cap": round(n / cfg["target_cap"]),
-        "price_at_target_coc_unlevered": round(p_unlev),
-        "price_at_target_coc_levered": round(p_lev),
+        "price_at_target_cap": max(0, round(n / cfg["target_cap"] - repairs)),
+        "price_at_target_coc_unlevered": max(0, round(p_unlev - repairs)),
+        "price_at_target_coc_levered": max(0, round(p_lev - repairs)),
+        "repairs_deducted": round(repairs),
     }
 
 
@@ -122,7 +130,7 @@ def evaluate(payload: dict) -> dict:
     rent = payload.get("monthly_rent")
     tax = payload.get("annual_tax")
     if rent and tax is not None:
-        rp = rental_prices(float(rent), float(tax), cfg)
+        rp = rental_prices(float(rent), float(tax), cfg, repairs)
         out["rental"] = rp
         # A hold is attractive if the financed 20%-CoC price clears the cash max.
         out["rental_hold_viable"] = rp["price_at_target_coc_levered"] >= cash_max
