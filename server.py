@@ -55,7 +55,7 @@ DEFAULT_FROM_NUMBER = "+15632055400"
 
 _RETELL_KEY_ENV = "RETELL_API" + "_KEY"
 _SMTP_PASS_ENV = "LEAD_NOTIFY_SMTP" + "_PASS"
-RETELL_API_KEY = _env(_RETELL_KEY_ENV)
+RETELL_API_KEY = os.environ.get(_RETELL_KEY_ENV) or os.environ.get(_RETELL_KEY_ENV.lower(), "")
 LEAD_DRY_RUN = os.environ.get("LEAD_DRY_RUN") == "1"
 DAILY_CALL_CAP = int(os.environ.get("LEAD_DAILY_CALL_CAP", "50") or "50")
 ALLOWED_ORIGINS = os.environ.get("FORM_ALLOWED_ORIGINS", "*")
