@@ -1,0 +1,1 @@
+{"addresses":{},"comment":"Pre-loaded ARVs by property address. An entry is added ONLY on Shawn's explicit approval (address + ARV from comps he has reviewed). The voice agent can quote numbers only for addresses listed here; every other property is intake-only, enforced in server.py. Note: 2330 W Buena Vista St $66,000 is NOT loaded - Shawn has not approved it."}

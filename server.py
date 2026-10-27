@@ -53,6 +53,63 @@ MARKET_FROM_NUMBERS = {
 }
 DEFAULT_FROM_NUMBER = "+15632055400"
 
+# ------------------------------------------------------------- ARV gate
+# Shawn's rule (2026-10-27): the agent NEVER supplies the ARV. Pre-loaded
+# ARVs live in arv_table.json beside this file (address -> ARV, added only
+# on Shawn's approval). /offer resolves the ARV from the property address
+# server-side; an address with no loaded ARV gets an intake-only refusal,
+# so no agent can quote off an invented value. Maintenance checks may
+# bypass with "direct_test": true — that flag is never a declared field
+# in the Retell function schema, so the agent cannot emit it.
+ARV_TABLE_FILE = os.path.join(BASE_DIR, "arv_table.json")
+
+_SUFFIX = {"avenue": "ave", "street": "st", "drive": "dr", "road": "rd",
+           "lane": "ln", "court": "ct", "boulevard": "blvd",
+           "parkway": "pkwy", "place": "pl", "trail": "trl",
+           "circle": "cir", "terrace": "ter", "highway": "hwy"}
+_CITIES = ("detroit", "memphis", "cleveland")
+
+
+def _addr_key(address):
+    """Loose match key: (house number, first street token, zip if any)."""
+    s = re.sub(r"[^a-z0-9 ]", " ", str(address or "").lower())
+    toks = [_SUFFIX.get(t, t) for t in s.split()]
+    nums = [t for t in toks if t.isdigit()]
+    zip5 = next((t for t in toks if len(t) == 5 and t.isdigit()), "")
+    house = nums[0] if nums else ""
+    street = next((t for t in toks if not t.isdigit() and len(t) > 1
+                   and t not in _CITIES and t != zip5), "")
+    return (house, street, zip5)
+
+
+def _load_arv_table():
+    try:
+        with open(ARV_TABLE_FILE) as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+    table = {}
+    for addr, arv in (raw.get("addresses") or {}).items():
+        try:
+            table[_addr_key(addr)] = float(arv)
+        except Exception:
+            continue
+    return table
+
+
+def _preloaded_arv(address):
+    """The loaded ARV for an address, or None if none is loaded."""
+    if not address:
+        return None
+    key = _addr_key(address)
+    table = _load_arv_table()
+    if key in table:
+        return table[key]
+    # Fall back: unique match on house number + street, ignoring zip.
+    loose = [v for (h, s, z), v in table.items()
+             if h and h == key[0] and s == key[1]]
+    return loose[0] if len(loose) == 1 else None
+
 _RETELL_KEY_ENV = "RETELL_API" + "_KEY"
 _SMTP_PASS_ENV = "LEAD_NOTIFY_SMTP" + "_PASS"
 RETELL_API_KEY = os.environ.get(_RETELL_KEY_ENV) or os.environ.get(_RETELL_KEY_ENV.lower(), "")
@@ -117,6 +174,7 @@ def _recent_leads(limit=50):
 
 
 def _build_retell_payload(record, from_number):
+    _arv = _preloaded_arv(record.get("property_address"))
     return {
         "from_number": from_number,
         "to_number": record["phone_normalized"],
@@ -126,6 +184,7 @@ def _build_retell_payload(record, from_number):
             "property_address": record.get("property_address", ""),
             "market": record.get("market", ""),
             "lead_source": "website_form",
+            "arv": str(int(_arv)) if _arv else "",
             "condition_notes": record.get("condition_notes", ""),
             "timeline": record.get("timeline", ""),
             "preference": record.get("preference", ""),
@@ -234,6 +293,31 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             # Retell function calls may nest arguments; accept either shape.
             args = payload.get("args") or payload.get("arguments") or payload
+            if not args.get("direct_test"):
+                # ARV gate: resolve the ARV server-side from the property
+                # address; anything the caller passed as "arv" is ignored.
+                addr = args.get("property_address") or ""
+                if not addr:
+                    call = payload.get("call") or {}
+                    dyn = call.get("retell_llm_dynamic_variables") or {}
+                    addr = dyn.get("property_address") or ""
+                arv = _preloaded_arv(addr)
+                if arv is None:
+                    self._json(200, {
+                        "error": "no_preloaded_arv",
+                        "recommended_structure": "intake_only",
+                        "max_offer": None, "ceiling": None,
+                        "opening_offer": None,
+                        "instruction": (
+                            "No pre-loaded valuation exists for this "
+                            "property. Do NOT quote, estimate, or imply "
+                            "any price, range, or property value. Continue "
+                            "intake only: confirm condition, timeline, and "
+                            "the best contact details, and arrange a "
+                            "follow-up once a valuation has been loaded."),
+                    })
+                    return
+                args["arv"] = arv
             result = evaluate(args)
             self._json(200, result)
         except KeyError as e:
