@@ -45,7 +45,7 @@ LEADS_FILE = os.path.join(BASE_DIR, "leads.jsonl")
 STATE_FILE = os.path.join(BASE_DIR, "lead_state.json")
 
 RETELL_API_URL = "https://api.retellai.com/v2/create-phone-call"
-SELLER_AGENT_ID = "agent_ca7199553e1038aa58fa6b0c1b1"
+SELLER_AGENT_ID = "agent_ca7199553e1038aa58fa6b0c1b"
 MARKET_FROM_NUMBERS = {
     "detroit": "+13132515320",
     "memphis": "+19014378022",
