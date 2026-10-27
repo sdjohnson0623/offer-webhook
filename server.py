@@ -319,6 +319,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 args["arv"] = arv
             result = evaluate(args)
+            if not args.get("direct_test") and "rental" not in result:
+                # Gate passed but no rent/tax was supplied, so the
+                # rental-hold and seller-finance paths could not be
+                # computed and the cash figure is the wholesale fallback
+                # (this is what disarmed the agent on the 2026-10-27
+                # Buena Vista test call). Tell the agent to collect the
+                # income figures and re-run once, as its rules allow.
+                result["income_data_missing"] = True
+                result["income_instruction"] = (
+                    "These figures are the wholesale cash fallback ONLY: "
+                    "monthly rent and annual tax were not supplied, so the "
+                    "rental-hold ceiling and the seller-finance options "
+                    "were NOT computed. Before quoting any number, ask the "
+                    "seller what the property rents for (or last rented "
+                    "for) and roughly what the yearly taxes run, then "
+                    "re-run compute_offer once with monthly_rent and "
+                    "annual_tax included.")
             self._json(200, result)
         except KeyError as e:
             self._json(400, {"error": f"missing required field: {e}"})
